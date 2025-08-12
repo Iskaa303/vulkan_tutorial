@@ -5,11 +5,17 @@ use image::{ImageBuffer, Rgba};
 use log::info;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyImageToBufferInfo};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, DeviceCreateInfo, QueueCreateInfo, QueueFlags};
-use vulkano::format::{ClearColorValue, Format};
+use vulkano::format::Format;
+use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::pipeline::compute::ComputePipelineCreateInfo;
+use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
+use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::sync::GpuFuture;
 use vulkano::{sync, VulkanLibrary};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
@@ -70,13 +76,37 @@ fn main() -> Result<()>
         }
     }
 
+    let shader = compute_shader::load(device.clone())
+        .context("failed to load a compute shader")?;
+
+    let compute_shader = shader.entry_point("main").unwrap();
+    let stage = PipelineShaderStageCreateInfo::new(compute_shader);
+    let layout = PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+            .into_pipeline_layout_create_info(device.clone())
+            .context("failed to create PipelineLayoutCreateInfo")?
+    )
+    .context("failed to create a new PipelineLayout")?;
+
+    let compute_pipeline = ComputePipeline::new(
+        device.clone(),
+        None,
+        ComputePipelineCreateInfo::stage_layout(stage, layout)
+    )
+    .context("failed to create a new ComputePipeline")?;
+
+    let descriptor_set_allocator = Arc::new(
+        StandardDescriptorSetAllocator::new(device.clone(), Default::default())
+    );
+
     let image = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim2d,
             format: Format::R8G8B8A8_UNORM,
             extent: [1024, 1024, 1],
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             ..Default::default()
         },
         AllocationCreateInfo {
@@ -85,6 +115,21 @@ fn main() -> Result<()>
         },
     )
     .context("failed to create an image")?;
+
+    let view = ImageView::new_default(image.clone())
+        .context("failed to create an ImageView")?;
+
+    let layout = compute_pipeline
+        .layout()
+        .set_layouts()
+        .get(0)
+        .context("failed to return a layout")?;
+    let set = DescriptorSet::new(
+        descriptor_set_allocator,
+        layout.clone(),
+        [WriteDescriptorSet::image_view(0, view.clone())],
+        []
+    ).context("failed to create a set")?;
 
     let buf = Buffer::from_iter(
         memory_allocator.clone(),
@@ -114,16 +159,28 @@ fn main() -> Result<()>
     .context("failed to create an AutoCommandBufferBuilder")?;
 
     command_buffer_builder
-        .clear_color_image(ClearColorImageInfo {
-            clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]),
-            ..ClearColorImageInfo::image(image.clone())
-        })
-        .context("failed to clear color image")?
+        .bind_pipeline_compute(compute_pipeline.clone())
+        .context("failed to bind a compute pipeline to a command buffer")?
+        .bind_descriptor_sets(
+            PipelineBindPoint::Compute,
+            compute_pipeline.layout().clone(),
+            0,
+            set,
+        )
+        .context("failed to bind descriptor sets to a command buffer")?;
+
+    unsafe {
+        command_buffer_builder
+            .dispatch([1024 / 8, 1024 / 8, 1])
+            .context("failed to dispatch work_group_counts")?;
+    }
+
+    command_buffer_builder
         .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
             image.clone(),
             buf.clone(),
         ))
-        .context("failed to copy from an image to a buffer")?;
+        .context("failed to copy an image to a buffer")?;
     
     let command_buffer = command_buffer_builder
         .build()
