@@ -15,18 +15,47 @@ void main() {
     vec2 z = vec2(0.0, 0.0);
     float i;
     const float max_iter = 200.0;
+    bool diverged = false;
+    
     for (i = 0.0; i < max_iter; i++) {
+        if (dot(z, z) > 2000.0 * 2000.0) {
+            diverged = true;
+            break;
+        }
+        
         z = vec2(
             z.x * z.x - z.y * z.y + c.x,
             2.0 * z.x * z.y + c.y
         );
-
-        if (dot(z, z) > 4.0) {
-            break;
-        }
     }
 
-    float t = i / max_iter;
-    vec4 to_write = vec4(vec3(t), 1.0);
+    const vec3 palette[8] = vec3[](
+        vec3(0.0, 0.0, 0.0),
+        vec3(0.5, 0.5, 0.5),
+        vec3(1.0, 0.5, 0.5),
+        vec3(0.5, 1.0, 0.5),
+        vec3(0.5, 0.5, 1.0),
+        vec3(0.5, 1.0, 1.0),
+        vec3(1.0, 0.5, 1.0),
+        vec3(1.0, 1.0, 0.5)
+    );
+
+    vec4 to_write;
+    
+    if (diverged) {
+        const int nPalette = 8;
+        float smoothed = log2(log2(dot(z, z)) / 2.0);
+        float fColorIndex = sqrt(i + 10.0 - smoothed);
+        
+        float colorLerp = fract(fColorIndex);
+        int colorIndexA = int(fColorIndex) % nPalette;
+        int colorIndexB = (colorIndexA + 1) % nPalette;
+        
+        vec3 col = mix(palette[colorIndexA], palette[colorIndexB], colorLerp);
+        to_write = vec4(col, 1.0);
+    } else {
+        to_write = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
     imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
 }

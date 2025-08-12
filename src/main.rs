@@ -100,8 +100,8 @@ fn main() -> Result<()>
         StandardDescriptorSetAllocator::new(device.clone(), Default::default())
     );
 
-    let width = 4096;
-    let height = 4096;
+    let width = 960 * 4;
+    let height = 720 * 4;
 
     let image = Image::new(
         memory_allocator.clone(),
