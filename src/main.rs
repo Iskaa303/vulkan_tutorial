@@ -4,9 +4,14 @@ use anyhow::{Context, Ok, Result};
 use log::info;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, DeviceCreateInfo, QueueCreateInfo, QueueFlags};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::pipeline::compute::ComputePipelineCreateInfo;
+use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
+use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::sync::GpuFuture;
 use vulkano::{sync, VulkanLibrary};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
@@ -14,6 +19,8 @@ use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 fn main() -> Result<()>
 {
     env_logger::init();
+
+    info!("Start of the program");
 
     let library = VulkanLibrary::new().context("no local Vulkan library/DLL")?;
     let instance = Instance::new(
@@ -58,6 +65,70 @@ fn main() -> Result<()>
         device.clone()
     ));
 
+    // Compute pipeline
+
+    let data_iter = 0..65536u32;
+    let data_buffer = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        data_iter,
+    )
+    .context("failed to create a buffer from an iterator")?;
+
+    mod compute_shader {
+        vulkano_shaders::shader!{
+            ty: "compute",
+            path: "src/shaders/compute.comp"
+        }
+    }
+
+    let shader = compute_shader::load(device.clone())
+        .context("failed to load a compute shader")?;
+
+    let compute_shader = shader.entry_point("main").unwrap();
+    let stage = PipelineShaderStageCreateInfo::new(compute_shader);
+    let layout = PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+            .into_pipeline_layout_create_info(device.clone())
+            .context("failed to create PipelineLayoutCreateInfo")?
+    )
+    .context("failed to create a new PipelineLayout")?;
+
+    let compute_pipeline = ComputePipeline::new(
+        device.clone(),
+        None,
+        ComputePipelineCreateInfo::stage_layout(stage, layout)
+    )
+    .context("failed to create a new ComputePipeline")?;
+
+    let descriptor_set_allocator = Arc::new(
+        StandardDescriptorSetAllocator::new(device.clone(), Default::default())
+    );
+    let pipeline_layout = compute_pipeline.layout();
+    let descriptor_set_layouts = pipeline_layout.set_layouts();
+
+    let descriptor_set_layout_index = 0;
+    let descriptor_set_layout = descriptor_set_layouts
+        .get(descriptor_set_layout_index)
+        .context("failed to get descriptor_set_layout")?;
+    let descriptor_set = DescriptorSet::new(
+        descriptor_set_allocator,
+        descriptor_set_layout.clone(),
+        [WriteDescriptorSet::buffer(0, data_buffer.clone())],
+        [],
+    )
+    .context("failed to create a new DescriptorSet")?;
+
+    // Command buffer
+
     let command_buffer_allocator = Arc::new(
         StandardCommandBufferAllocator::new(
             device.clone(),
@@ -66,49 +137,30 @@ fn main() -> Result<()>
 
     let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
         command_buffer_allocator,
-        queue_family_index,
+        queue.queue_family_index(),
         CommandBufferUsage::OneTimeSubmit,
     )
     .context("failed to create an AutoCommandBufferBuilder")?;
 
-    // Example buffer operation
+    let work_group_counts = [1024, 1, 1];
 
-    let source_content: Vec<i32> = (0..64).collect();
-    let source = Buffer::from_iter(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        },
-        source_content,
-    )
-    .context("failed to create a source buffer from an iterator")?;
-
-    let destination_content: Vec<i32> = (0..64).map(|_| 0).collect();
-    let destination = Buffer::from_iter(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_DST,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_RANDOM_ACCESS,
-            ..Default::default()
-        },
-        destination_content,
-    )
-    .context("failed to create a destination buffer from an iterator")?;
-    
     command_buffer_builder
-        .copy_buffer(CopyBufferInfo::buffers(source.clone(), destination.clone()))
-        .context("failed to copy source and destination buffers into an AutoCommandBufferBuilder")?;
+        .bind_pipeline_compute(compute_pipeline.clone())
+        .context("failed to bind a compute pipeline to a command buffer")?
+        .bind_descriptor_sets(
+            PipelineBindPoint::Compute,
+            compute_pipeline.layout().clone(),
+            descriptor_set_layout_index as u32,
+            descriptor_set,
+        )
+        .context("failed to bind descriptor sets to a command buffer")?;
 
-    // Example buffer operation end
-
+    unsafe {
+        command_buffer_builder
+            .dispatch(work_group_counts)
+            .context("failed to dispatch work_group_counts")?;
+    }
+    
     let command_buffer = command_buffer_builder
         .build()
         .context("failed to build a PrimaryAutoCommandBuffer")?;
@@ -121,21 +173,13 @@ fn main() -> Result<()>
 
     future.wait(None).context("failed to block current thread")?;
 
-    // Example buffer operation continuation
+    // Check if the pipeline has been correctly executed
+    let content = data_buffer.read().context("failed to read data_buffer")?;
+    for (n, val) in content.iter().enumerate() {
+        assert_eq!(*val, n as u32 * 12);
+    }
 
-    let src_content = source
-        .read()
-        .context("failed to read the source content from the buffer")?;
-
-    let dest_content = destination
-        .read()
-        .context("failed to read the destination content from the buffer")?;
-
-    assert_eq!(&*src_content, &*dest_content);
-
-    info!("everything succeeded!");
-
-    // Example buffer operation end
+    info!("Everything succeeded!");
 
     Ok(())
 }
