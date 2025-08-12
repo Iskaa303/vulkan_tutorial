@@ -100,12 +100,15 @@ fn main() -> Result<()>
         StandardDescriptorSetAllocator::new(device.clone(), Default::default())
     );
 
+    let width = 4096;
+    let height = 4096;
+
     let image = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim2d,
             format: Format::R8G8B8A8_UNORM,
-            extent: [1024, 1024, 1],
+            extent: [width, height, 1],
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             ..Default::default()
         },
@@ -141,7 +144,7 @@ fn main() -> Result<()>
             memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_RANDOM_ACCESS,
             ..Default::default()
         },
-        (0..1024 * 1024 * 4).map(|_| 0u8),
+        (0..width * height * 4).map(|_| 0u8),
     )
     .context("failed to create a buffer from an iterator")?;
 
@@ -171,7 +174,7 @@ fn main() -> Result<()>
 
     unsafe {
         command_buffer_builder
-            .dispatch([1024 / 8, 1024 / 8, 1])
+            .dispatch([width / 8, height / 8, 1])
             .context("failed to dispatch work_group_counts")?;
     }
 
@@ -196,7 +199,7 @@ fn main() -> Result<()>
 
     let buffer_content = buf.read().context("failed to read buffer")?;
     let image = 
-        ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..])
+        ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, &buffer_content[..])
     .context("failed to construct an ImageBuffer")?;
 
     image.save("image.png").context("failed to save an image")?;
