@@ -1,3 +1,5 @@
+My adventure in learning [Vulkan](https://www.vulkan.org/) in [Rust](https://www.rust-lang.org/) using [Vulkano](https://github.com/vulkano-rs/vulkano) bindings.
+
 Initially based on the [Vulkano book](https://vulkano.rs/).
 
 As soon as I discovered how to render images, I decided not only to render standard mandelbrote set like in the book, but I also decided to make it more colourful.
